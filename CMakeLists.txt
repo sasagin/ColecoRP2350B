@@ -67,7 +67,7 @@ target_link_libraries(RP2350Tester
         hardware_clocks
         hardware_pwm
         hardware_pio
-        hardware_i2c
+        # hardware_i2c
         pico_multicore
         hardware_interp hardware_timer hardware_clocks hardware_pwm hardware_flash
         )
