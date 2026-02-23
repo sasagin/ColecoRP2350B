@@ -4,7 +4,7 @@
 #include "hardware/gpio.h"
 #include "hardware/clocks.h"
 #include "hardware/pwm.h"
-#include "hardware/i2c.h"
+// #include "hardware/i2c.h"
 
 #include "hardware/vreg.h"
 #include <hardware/structs/qmi.h>
@@ -234,27 +234,7 @@ void convert_nes_to_coleco_joypad(uint8_t nes_joy_data,uint8_t num_joypad){
 
 }
 
-void i2c_PCF8575_init(int CLOCK_I2C) {
-    
-    i2c_init(i2c_PCF8575_port, CLOCK_I2C * 1000);
-    gpio_set_function(PICO_I2C_PCF8575_SDA_PIN, GPIO_FUNC_I2C);
-    gpio_set_function(PICO_I2C_PCF8575_SCL_PIN, GPIO_FUNC_I2C);
-    gpio_pull_up(PICO_I2C_PCF8575_SDA_PIN);
-    gpio_pull_up(PICO_I2C_PCF8575_SCL_PIN);
-};
 
-void sendI2C(uint8_t command, uint8_t data) {
-    const uint8_t i2c_reg[2] = {command, data};
-    i2c_write_blocking(i2c_PCF8575_port, I2C_PCF8575_ADDR, &i2c_reg[0], 2, false);
-}
-
-void resieveI2C(){
-        i2c_read_blocking(i2c_PCF8575_port, I2C_PCF8575_ADDR, &coleco_joysticks[0], 2, false);
-};
-
-static void i2c_PCF8575() {
-        sendI2C(~reg_2, ~reg_1); 
-};
 
 void Z80_pin_setup() {
     inInit(MREQ_PIN);
@@ -498,7 +478,7 @@ int main() {
         set_sys_clock_hz(315 * MHZ, 1); // fallback to failsafe clocks
     // }
 
-    stdio_init_all();
+    // stdio_init_all();
 
     
 
@@ -554,18 +534,12 @@ int main() {
 
     multicore_launch_core1(Z80_loop);
 
-    busy_wait_ms(50);
-        
-    gpio_put(RESET_PIN,1);    
-
-
-    // i2c_PCF8575_init(CLOCK_I2C_400kHz);
-    // busy_wait_ms(20);
-
-// reg_1 = lower_bank;
-// reg_2 = upper_bank;
-
-encoder1 = 0x4f;
+// reset
+    gpio_put(RESET_PIN,1);    busy_wait_ms(200);
+    gpio_put(RESET_PIN,0);    busy_wait_ms(200);    
+    gpio_put(RESET_PIN,1);
+    //mask for input joypad
+    encoder1 = 0x4f;
 
     while (true) {
 
@@ -619,8 +593,6 @@ encoder1 = 0x4f;
     }
 
         data_joysticks[0] |= encoder1 & 0xB0;
-
-        // sendI2C(~encoder_counter,data_joysticks[0]);
-  
+ 
     }//while
 }//main
