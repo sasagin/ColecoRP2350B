@@ -5,6 +5,7 @@
 #include "hardware/clocks.h"
 #include "hardware/pwm.h"
 // #include "hardware/i2c.h"
+#include "hardware/timer.h"
 
 #include "hardware/vreg.h"
 #include <hardware/structs/qmi.h>
@@ -42,6 +43,7 @@
 #include "./games/SACntrlrTst.h"
 #include "./games/io.h"
 #include "./games/retropipe.h"
+#include "./games/suitecv.h"
 
 #include "Z80pinout.h"
 #include "VDP_int_Z80.pio.h"
@@ -76,12 +78,6 @@ Button      1REG        2REG
 #define PIN_NES_JOYPAD_DATA1  44
 #define PIN_NES_JOYPAD_DATA2  45
 #define NES_JOYPAD_SHIFT_COUNT 8
-
-#define i2c_PCF8575_port (i2c0)
-#define CLOCK_I2C_400kHz (400)
-#define I2C_PCF8575_ADDR (0x20)
-#define PICO_I2C_PCF8575_SDA_PIN (0)
-#define PICO_I2C_PCF8575_SCL_PIN (1)
 
 //RESET
 #define RESET_PIN      34
@@ -118,6 +114,9 @@ uint8_t __aligned(4) coleco_bios[8192];
 uint8_t __aligned(4) coleco_cartrige[0x20000];
 uint8_t __aligned(4) coleco_ram[1024];
 uint8_t __aligned(4) SGM_ram[32768];
+
+size_t romsize;
+static unsigned char* rom_name;
 
 uint8_t upper_bank = 1;
 uint8_t lower_bank = 0;
@@ -234,8 +233,6 @@ void convert_nes_to_coleco_joypad(uint8_t nes_joy_data,uint8_t num_joypad){
 
 }
 
-
-
 void Z80_pin_setup() {
     inInit(MREQ_PIN);
     inInit(WR_PIN);
@@ -277,7 +274,9 @@ __always_inline static inline void write_coleco_io(const uint16_t address, const
 
                     portIO = portIO & 0xE0;
                     if(portIO == 0xC0) {en_1 = true; }         
-                    if(portIO == 0x80) {en_1 = false;start_read_joypad=true;}
+                    if(portIO == 0x80) {en_1 = false;
+                        // start_read_joypad=true;
+                    }
     // pin WR for  pico VDP 9918                     
                     if(portIO == 0xA0) {gpio_put(VDP_WR,0);}
     // pin WR for  SN76489                     
@@ -441,20 +440,21 @@ void __time_critical_func(Z80_loop)() {
     }
 }
 
-uint8_t checkROM(uint application_len){
+uint8_t checkROM(size_t application_len ){
         uint32_t headerROM = 0;
         uint32_t offsetROM = 0;
         uint8_t start_bank = 0;
+        uint16_t lenght_rom = (uint16_t)application_len; 
         bool ROMisOK;
 
-        uint8_t bank_qntt = application_len / 0x4000 ;     
+        uint8_t bank_qntt = lenght_rom / 0x4000 ;     
         headerROM = coleco_cartrige[offsetROM + 1] | (coleco_cartrige[offsetROM + 0] << 8);
         ROMisOK = (headerROM == 0xAA55) || (headerROM == 0x55AA);
 
         if(ROMisOK){start_bank = 0;  return start_bank; }
-        else if(application_len > 0x8000){
+        else if(lenght_rom > 0x8000){
 
-                offsetROM = application_len - 0x4000;
+                offsetROM = lenght_rom - 0x4000;
            
                 headerROM = coleco_cartrige[offsetROM + 1] | (coleco_cartrige[offsetROM + 0] << 8);
                 ROMisOK = (headerROM == 0xAA55) || (headerROM == 0x55AA);
@@ -463,7 +463,11 @@ uint8_t checkROM(uint application_len){
         }
     }
 
-
+// Обработчик таймера 8ms
+bool my_timer_callback(struct repeating_timer *t) {
+                start_read_joypad = true; 
+    return true; // продолжаем повторение
+}
 
 int main() {
 
@@ -478,9 +482,16 @@ int main() {
         set_sys_clock_hz(315 * MHZ, 1); // fallback to failsafe clocks
     // }
 
-    // stdio_init_all();
+    stdio_init_all();
 
     
+	struct repeating_timer timer_8ms;
+    
+    // Запускаем таймер: интервал 8 мс, немедленный старт
+    if (!add_repeating_timer_ms(-8, my_timer_callback, NULL, &timer_8ms)) {
+        printf("Failed to start timer\n");
+        return -1;
+    }
 
     // clock for CPU
  
@@ -493,8 +504,9 @@ int main() {
     // Initialize select out interrupt from VDP to Z80
 
     VDP_INT_init();
-
+//BIOS
     memcpy(coleco_bios, COLECO_BIOS, 8192);
+//ROM    
     // memcpy(coleco_cartrige, COLECO_TEST, 8192);
     // memcpy(coleco_cartrige, ZAXXON, 24576);
     // memcpy(coleco_cartrige, CONGOBONGO, 24576);
@@ -526,23 +538,34 @@ int main() {
     // memcpy(coleco_cartrige, airbattle_rom,airbattle_rom_len);
     // memcpy(coleco_cartrige, SAControllerTest_col, SAControllerTest_col_len);
     // memcpy(coleco_cartrige, io_rom, io_rom_len);
-    memcpy(coleco_cartrige, retropipe_rom, retropipe_rom_len);
+    // memcpy(coleco_cartrige, retropipe_rom, romsize = retropipe_rom_len);
 
-    lower_bank = checkROM(retropipe_rom_len);
+    rom_name = suitecv_rom;
+
+    romsize = sizeof(suitecv_rom);
+
+    memcpy(coleco_cartrige, rom_name, romsize);
+
+    lower_bank = checkROM(romsize);
     if(lower_bank == 0){upper_bank = 1;} else { upper_bank = 0;   }
 
 
     multicore_launch_core1(Z80_loop);
 
-// reset
-    gpio_put(RESET_PIN,1);    busy_wait_ms(200);
-    gpio_put(RESET_PIN,0);    busy_wait_ms(200);    
-    gpio_put(RESET_PIN,1);
-    //mask for input joypad
-    encoder1 = 0x4f;
+    busy_wait_ms(250);
+        
+    gpio_put(RESET_PIN,1);    
+
+
+    // i2c_PCF8575_init(CLOCK_I2C_400kHz);
+    // busy_wait_ms(20);
+
+// reg_1 = lower_bank;
+// reg_2 = upper_bank;
+
+encoder1 = 0x4f;
 
     while (true) {
-
     //decode joypad buttons
 
         if(start_read_joypad){
@@ -593,6 +616,8 @@ int main() {
     }
 
         data_joysticks[0] |= encoder1 & 0xB0;
- 
+
+        // sendI2C(~encoder_counter,data_joysticks[0]);
+  
     }//while
 }//main
