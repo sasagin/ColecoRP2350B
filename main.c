@@ -475,7 +475,7 @@ int main() {
 
     VDP_INT_init();
 
-sleep_ms(5000);    
+// sleep_ms(5000);    
 
 FATFS fs;
 FIL file_sd;
@@ -518,21 +518,21 @@ FILINFO fno;
 res = f_stat(rom_path, &fno);
 if (res != FR_OK) {
     printf("ROM file not found: %s\n", rom_path);
-    while (1) {}
+    // continue;
 }
 
 size_t file_size = fno.fsize;
 if (file_size == 0 || file_size > max_rom_size) {
     printf("Invalid ROM size: %lu bytes (max %lu)\n",
            (unsigned long)file_size, (unsigned long)max_rom_size);
-    while (1) {}
+    // continue;   
 }
 
 // Открываем и читаем ровно file_size байт
 res = f_open(&file_sd, rom_path, FA_READ);
 if (res != FR_OK) {
     printf("Cannot open ROM file!\n");
-    while (1) {}
+    // continue;
 }
 res = f_read(&file_sd, coleco_cartrige, file_size, &br);
 f_close(&file_sd);
@@ -540,7 +540,7 @@ f_close(&file_sd);
 if (res != FR_OK || br != file_size) {
     printf("ROM read error: expected %lu, got %lu\n",
            (unsigned long)file_size, (unsigned long)br);
-    while (1) {}
+    // continue;
 }
 printf("ROM loaded: %lu bytes from %s\n", (unsigned long)file_size, rom_path);
 
@@ -554,6 +554,9 @@ if (lower_bank == 0) {
 
 
 // START
+
+printf("Start");
+
     multicore_launch_core1(Z80_loop);
 
     busy_wait_ms(250);
