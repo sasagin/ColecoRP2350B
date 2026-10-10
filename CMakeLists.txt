@@ -40,13 +40,24 @@ add_executable(RP2350Tester main.c)
 pico_set_program_name(RP2350Tester "RP2350Tester")
 pico_set_program_version(RP2350Tester "0.1")
 
+add_subdirectory(drivers/sdcard)
+add_subdirectory(drivers/fatfs)
+
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(RP2350Tester 0)
-pico_enable_stdio_usb(RP2350Tester 0)
+pico_enable_stdio_usb(RP2350Tester 1)
 
 pico_generate_pio_header(${PROJECT_NAME}
         ${CMAKE_CURRENT_SOURCE_DIR}/VDP_int_Z80.pio
         OUTPUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/
+)
+
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+
+        SDCARD_PIN_SPI0_MISO=40
+        SDCARD_PIN_SPI0_CS=41
+        SDCARD_PIN_SPI0_SCK=42
+        SDCARD_PIN_SPI0_MOSI=43
 )
 
 # Add the standard library to the build
@@ -60,6 +71,9 @@ target_include_directories(RP2350Tester PRIVATE
 
 # Add any user requested libraries
 target_link_libraries(RP2350Tester
+
+        sdcard
+        fatfs
 
         pico_runtime
         pico_stdlib

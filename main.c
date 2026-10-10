@@ -11,39 +11,8 @@
 #include <hardware/structs/qmi.h>
 #include <hardware/structs/xip.h>
 
-#include "./roms/roms.h"
-#include "./games/zaxxon.h"
-#include "./games/CongoBongo.h"
-#include "./games/Action.h"
-#include "./games/Alcazar.h"
-#include "./games/Boulder.h"
-#include "./games/Choplifter.h"
-#include "./games/MrDo.h"
-#include "./games/Popeye.h"
-#include "./games/pepper.h"
-#include "./games/frenzy.h"
-#include "./games/Q_bert2.h"
-#include "./games/AntarcticA.h"
-#include "./games/DonkeyKong.h"
-#include "./games/pico9918.h"
-#include "./games/Breakout.h"
-#include "./games/shunt.h"
-#include "./games/thexder.h"
-#include "./games/trafficjam.h"
-#include "./games/cavern.h"
-#include "./games/reversi.h"
-#include "./games/sudoku.h"
-#include "./games/straycat.h"
-#include "./games/boxxle.h"
-#include "./games/cye.h"
-#include "./games/deep.h"
-#include "./games/kingsvalley.h"
-#include "./games/deflektor.h"
-#include "./games/airbattle.h"
-#include "./games/SACntrlrTst.h"
-#include "./games/io.h"
-#include "./games/retropipe.h"
-#include "./games/suitecv.h"
+#include "ff.h"
+#include "f_util.h"
 
 #include "Z80pinout.h"
 #include "VDP_int_Z80.pio.h"
@@ -73,32 +42,32 @@ Button      1REG        2REG
 */
 
 // NES-compatible gamepad (shift register) pins
-#define PIN_NES_JOYPAD_CLOCK 42
-#define PIN_NES_JOYPAD_LATCH 43
-#define PIN_NES_JOYPAD_DATA1  44
-#define PIN_NES_JOYPAD_DATA2  45
+#define PIN_NES_JOYPAD_CLOCK 32
+#define PIN_NES_JOYPAD_LATCH 33
+#define PIN_NES_JOYPAD_DATA1  34
+#define PIN_NES_JOYPAD_DATA2  35
 #define NES_JOYPAD_SHIFT_COUNT 8
 
 //RESET
-#define RESET_PIN      34
+#define RESET_PIN      44
 #define RESET_MASK (1ULL << RESET_PIN)
 
 // /VDP_RD 
-#define VDP_RD      38
+#define VDP_RD      36
 #define VDP_RD_MASK (1ULL << VDP_RD)
 
 // /VDP_WR 
-#define VDP_WR      39
+#define VDP_WR      37
 #define VDP_WR_MASK (1ULL << VDP_WR)
 
 // /AUD_W
-#define AUD_W       41
+#define AUD_W       39
 #define AUD_W_MASK (1ULL << AUD_W)
 
-#define ENCODER_IN_A    46
+#define ENCODER_IN_A    43
 #define ENCODER_IN_A_MASK   (1ULL << ENCODER_IN_A)
 
-#define ENCODER_IN_B    47
+#define ENCODER_IN_B    45
 #define ENCODER_IN_B_MASK   (1ULL << ENCODER_IN_B)
 
 #define VDP_INT_PIO     pio0
@@ -384,9 +353,9 @@ void __time_critical_func(Z80_loop)() {
         //------------memory ok-----------------
 
         while(!(gpio_get_all64() & MREQ_MASK)) {                                    // memory read write
-                uint16_t address = (uint16_t)((gpio_get_all() >> 6) & 0x0000ffff);  
+                uint16_t address = (uint16_t)((gpio_get_all()) & 0x0000ffff);  
                 while(!(gpio_get_all() & READ_MASK)) {                                  //  read from         
-                    const uint32_t data = read_coleco_memory(address) << 22;
+                    const uint32_t data = read_coleco_memory(address) << 16;
                     gpio_put_masked(DATA_MASK,data);
                     gpio_set_dir_out_masked(DATA_MASK);
                 }
@@ -395,14 +364,14 @@ void __time_critical_func(Z80_loop)() {
                             
                 while(!(gpio_get_all() & WRITE_MASK)) {                                 // write to ram                            
                         // : Goleco RAM
-                    uint8_t data_to_ram = (uint8_t)((gpio_get_all() >>22) & 0x000000FF);
+                    uint8_t data_to_ram = (uint8_t)((gpio_get_all() >> 16) & 0x000000FF);
                     write_coleco_memory(address,data_to_ram);                 
                 }         
         }
     
     // io port
         while(!(gpio_get_all64() & IORQ_MASK)) {
-            uint16_t address = (gpio_get_all() >> 6) ;              // mask io port address
+            uint16_t address = (gpio_get_all()) ;              // mask io port address
             uint8_t portIO = (uint8_t)(0x00FF & address);
 
     // read from IO             
@@ -411,14 +380,14 @@ void __time_critical_func(Z80_loop)() {
                     if((portIO & 0xE2) == 0xE0) {                              // first joypad == 0xE0/ second == 0xE2
                         uint8_t temp;
                         if(en_1){temp = data_joysticks[0];}else{temp = data_joysticks[1];}  
-                        const uint32_t data = ((uint32_t)temp) << 22 ; 
+                        const uint32_t data = ((uint32_t)temp) << 16 ; 
                         gpio_put_masked(DATA_MASK,data);           
                         gpio_set_dir_out_masked(DATA_MASK);
                         } 
                     if((portIO & 0xE2) == 0xE2) {                              // first joypad == 0xE0/ second == 0xE2
                         uint8_t temp;
                         if(en_1){temp = data_joysticks[2];}else{temp = data_joysticks[3];}                         
-                        const uint32_t data = ((uint32_t)temp) << 22 ;
+                        const uint32_t data = ((uint32_t)temp) << 16 ;
                         gpio_put_masked(DATA_MASK,data);           
                         gpio_set_dir_out_masked(DATA_MASK);
                         }
@@ -428,7 +397,7 @@ void __time_critical_func(Z80_loop)() {
     // write to IO        
             while(!(gpio_get_all64() & WRITE_MASK)) {                              // write to IO
 
-                uint8_t datawritetoio = (uint8_t)((gpio_get_all() >>22)&0x000000ff);
+                uint8_t datawritetoio = (uint8_t)((gpio_get_all() >> 16)&0x000000ff);
                 write_coleco_io(address,datawritetoio);
                 }
             gpio_set_dir_in_masked(DATA_MASK);
@@ -461,6 +430,7 @@ uint8_t checkROM(size_t application_len ){
 
                 if(ROMisOK){start_bank = bank_qntt - 1;return start_bank; }
         }
+
     }
 
 // Обработчик таймера 8ms
@@ -504,64 +474,92 @@ int main() {
     // Initialize select out interrupt from VDP to Z80
 
     VDP_INT_init();
-//BIOS
-    memcpy(coleco_bios, COLECO_BIOS, 8192);
-//ROM    
-    // memcpy(coleco_cartrige, COLECO_TEST, 8192);
-    // memcpy(coleco_cartrige, ZAXXON, 24576);
-    // memcpy(coleco_cartrige, CONGOBONGO, 24576);
-    // memcpy(coleco_cartrige, Action_rom, Action_rom_len);
-    // memcpy(coleco_cartrige, Alcazar_rom, Alcazar_rom_len);
-    // memcpy(coleco_cartrige, Boulder_rom, Boulder_rom_len);
-    // memcpy(coleco_cartrige, Choplifter_rom, Choplifter_rom_len);
-    // memcpy(coleco_cartrige, MrDo_rom, MrDo_rom_len);
-    // memcpy(coleco_cartrige, Popeye_rom, Popeye_rom_len);
-    // memcpy(coleco_cartrige, frenzy_rom, frenzy_rom_len);
-    // memcpy(coleco_cartrige, pepper_rom, pepper_rom_len);
-    // memcpy(coleco_cartrige, Q_bert2_col, Q_bert2_col_len);
-    // memcpy(coleco_cartrige, AntarcticA_rom, AntarcticA_rom_len);
-    // memcpy(coleco_cartrige, DonkeyKong_rom, DonkeyKong_rom_len);              
-    // memcpy(coleco_cartrige, pico9918_rom, pico9918_rom_len);
-    // memcpy(coleco_cartrige, Breakout_rom, Breakout_rom_len);
-    // memcpy(coleco_cartrige, shunt_rom, shunt_rom_len);
-    // memcpy(coleco_cartrige, thexder_rom, thexder_rom_len);
-    // memcpy(coleco_cartrige, cavern_rom, cavern_rom_len);
-    // memcpy(coleco_cartrige, reversi_rom, reversi_rom_len);
-    // memcpy(coleco_cartrige, trafficjam_rom, trafficjam_rom_len);
-    // memcpy(coleco_cartrige, sudoku_rom, sudoku_rom_len);
-    // memcpy(coleco_cartrige, straycat_rom, straycat_rom_len);
-    // memcpy(coleco_cartrige, boxxle_rom, boxxle_rom_len);
-    // memcpy(coleco_cartrige, cye_rom, cye_rom_len);
-    // memcpy(coleco_cartrige, deep_rom, deep_rom_len);
-    // memcpy(coleco_cartrige, kingsvalley_rom,kingsvalley_rom_len);
-    // memcpy(coleco_cartrige, deflektor_rom,deflektor_rom_len);
-    // memcpy(coleco_cartrige, airbattle_rom,airbattle_rom_len);
-    // memcpy(coleco_cartrige, SAControllerTest_col, SAControllerTest_col_len);
-    // memcpy(coleco_cartrige, io_rom, io_rom_len);
-    // memcpy(coleco_cartrige, retropipe_rom, romsize = retropipe_rom_len);
 
-    rom_name = suitecv_rom;
+sleep_ms(5000);    
 
-    romsize = sizeof(suitecv_rom);
+FATFS fs;
+FIL file_sd;
+UINT br;
+FRESULT res;
 
-    memcpy(coleco_cartrige, rom_name, romsize);
+// 1. Монтируем SD
+if (FR_OK != f_mount(&fs, "", 1)) {
+    printf("SD Card not mounted!\n");
+    while (1) {}  // вешаем плату, чтобы видеть ошибку
+}
 
-    lower_bank = checkROM(romsize);
-    if(lower_bank == 0){upper_bank = 1;} else { upper_bank = 0;   }
+// ---------------------------------------------------------
+// Загрузка BIOS (всегда фиксированный размер для Coleco)
+// ---------------------------------------------------------
+const size_t bios_size = 0x2000;  // 8 КБ — стандартный размер BIOS ColecoVision
+res = f_open(&file_sd, "/COL/BIOS/main.rom", FA_READ);
+if (res != FR_OK) {
+    printf("Cannot open BIOS file!\n");
+    while (1) {}
+}
+res = f_read(&file_sd, coleco_bios, bios_size, &br);
+f_close(&file_sd);
+
+if (res != FR_OK || br != bios_size) {
+    printf("BIOS read error or size mismatch: expected %lu, got %lu\n",
+           (unsigned long)bios_size, (unsigned long)br);
+    while (1) {}
+}
+printf("BIOS loaded: %lu bytes\n", (unsigned long)br);
+
+// ---------------------------------------------------------
+// Загрузка ROM картриджа (универсально до 128 КБ)
+// ---------------------------------------------------------
+const char *rom_path = "/COL/CART/game.rom";  // путь к файлу
+size_t max_rom_size = 131072;                // 128 КБ = 128 * 1024
+
+// Сначала узнаём реальный размер файла на SD
+FILINFO fno;
+res = f_stat(rom_path, &fno);
+if (res != FR_OK) {
+    printf("ROM file not found: %s\n", rom_path);
+    while (1) {}
+}
+
+size_t file_size = fno.fsize;
+if (file_size == 0 || file_size > max_rom_size) {
+    printf("Invalid ROM size: %lu bytes (max %lu)\n",
+           (unsigned long)file_size, (unsigned long)max_rom_size);
+    while (1) {}
+}
+
+// Открываем и читаем ровно file_size байт
+res = f_open(&file_sd, rom_path, FA_READ);
+if (res != FR_OK) {
+    printf("Cannot open ROM file!\n");
+    while (1) {}
+}
+res = f_read(&file_sd, coleco_cartrige, file_size, &br);
+f_close(&file_sd);
+
+if (res != FR_OK || br != file_size) {
+    printf("ROM read error: expected %lu, got %lu\n",
+           (unsigned long)file_size, (unsigned long)br);
+    while (1) {}
+}
+printf("ROM loaded: %lu bytes from %s\n", (unsigned long)file_size, rom_path);
+
+// Теперь можно вызывать твой checkROM с реальным размером файла
+lower_bank = checkROM(file_size);
+if (lower_bank == 0) {
+    upper_bank = 1;
+} else {
+    upper_bank = 0;
+}
 
 
+// START
     multicore_launch_core1(Z80_loop);
 
     busy_wait_ms(250);
         
     gpio_put(RESET_PIN,1);    
 
-
-    // i2c_PCF8575_init(CLOCK_I2C_400kHz);
-    // busy_wait_ms(20);
-
-// reg_1 = lower_bank;
-// reg_2 = upper_bank;
 
 encoder1 = 0x4f;
 
