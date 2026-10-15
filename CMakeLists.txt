@@ -42,6 +42,7 @@ pico_set_program_version(RP2350Tester "0.1")
 
 add_subdirectory(drivers/sdcard)
 add_subdirectory(drivers/fatfs)
+add_subdirectory(drivers/SSG_AY)
 
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(RP2350Tester 0)
@@ -74,6 +75,7 @@ target_link_libraries(RP2350Tester
 
         sdcard
         fatfs
+        aySoundSoft        
 
         pico_runtime
         pico_stdlib
@@ -81,9 +83,12 @@ target_link_libraries(RP2350Tester
         hardware_clocks
         hardware_pwm
         hardware_pio
+        hardware_dma
         # hardware_i2c
         pico_multicore
-        hardware_interp hardware_timer hardware_clocks hardware_pwm hardware_flash
+        hardware_interp 
+        hardware_timer
+        hardware_flash
         )
 
 pico_add_extra_outputs(RP2350Tester)

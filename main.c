@@ -6,6 +6,7 @@
 #include "hardware/pwm.h"
 // #include "hardware/i2c.h"
 #include "hardware/timer.h"
+#include "hardware/dma.h"
 
 #include "hardware/vreg.h"
 #include <hardware/structs/qmi.h>
@@ -13,6 +14,8 @@
 
 #include "ff.h"
 #include "f_util.h"
+
+#include "drivers/SSG_AY/aySoundSoft.h"
 
 #include "Z80pinout.h"
 #include "VDP_int_Z80.pio.h"
@@ -48,6 +51,12 @@ Button      1REG        2REG
 #define PIN_NES_JOYPAD_DATA2  35
 #define NES_JOYPAD_SHIFT_COUNT 8
 
+#define i2c_PCF8575_port (i2c0)
+#define CLOCK_I2C_400kHz (400)
+#define I2C_PCF8575_ADDR (0x20)
+#define PICO_I2C_PCF8575_SDA_PIN (0)
+#define PICO_I2C_PCF8575_SCL_PIN (1)
+
 //RESET
 #define RESET_PIN      44
 #define RESET_MASK (1ULL << RESET_PIN)
@@ -64,10 +73,14 @@ Button      1REG        2REG
 #define AUD_W       39
 #define AUD_W_MASK (1ULL << AUD_W)
 
-#define ENCODER_IN_A    43
+// /AUD_W
+#define SGM_PSG       45
+#define SGM_PSG_MASK (1ULL << SGM_PSG)
+
+#define ENCODER_IN_A    42
 #define ENCODER_IN_A_MASK   (1ULL << ENCODER_IN_A)
 
-#define ENCODER_IN_B    45
+#define ENCODER_IN_B    43
 #define ENCODER_IN_B_MASK   (1ULL << ENCODER_IN_B)
 
 #define VDP_INT_PIO     pio0
@@ -80,20 +93,26 @@ uint8_t encoder2;
 int encoder_counter = 0;
 
 uint8_t __aligned(4) coleco_bios[8192];
-uint8_t __aligned(4) coleco_cartrige[0x20000];
+uint8_t __aligned(4) coleco_cartrige[8][0x4000];
 uint8_t __aligned(4) coleco_ram[1024];
-uint8_t __aligned(4) SGM_ram[32768];
-
-size_t romsize;
-static unsigned char* rom_name;
+uint8_t __aligned(4) SGM_ram[0x8000];
 
 uint8_t upper_bank = 1;
 uint8_t lower_bank = 0;
-bool page0 = false;
-bool page1 = false;
+uint8_t bank_qntt;
 
-volatile uint8_t reg_1 = 0x01; //
-volatile uint8_t reg_2 = 0x02; //
+bool SGM_page0 = false;
+bool SGM_page1 = false;
+bool SGM_on = 0;
+uint16_t sample_to_send = 0;
+
+// for test
+volatile uint8_t reg_1 ; //
+volatile uint8_t reg_2 ; //
+volatile uint8_t reg_3 ; //
+volatile uint16_t reg_4 ; //
+volatile bool start_reg ;
+
 
 static uint8_t coleco_joysticks [4] = {0xff,0xff,0xff,0xff};
 volatile uint8_t data_joysticks[4];
@@ -234,74 +253,74 @@ void VDP_INT_init() {
     pio_sm_set_enabled(piopio, smsm, true);
 }
 
+// Z80 read-side address decode: ioport,.
+__always_inline static inline uint8_t read_coleco_io(const uint16_t address){
+
+    uint8_t portIO = (uint8_t)(address & 0x00ff);
+
+    if (portIO == 0x52) { return AY_get_reg();}                         //SGM audio read register
+
+    portIO &= 0xE2;
+    if(portIO == 0xE0) {return en_1 ? data_joysticks[0] : data_joysticks[1]; }
+    if(portIO == 0xE2) {return en_1 ? data_joysticks[2] : data_joysticks[3]; }
+
+    return 0xFF;
+}
+
 // Z80 write-side address decode: ioport,.
+
 __always_inline static inline void write_coleco_io(const uint16_t address, const uint8_t value) {
-                    uint8_t portIO = (uint8_t)(address & 0x00ff);
 
-                    if (portIO == 0x53) { page1 = (value & 0x01); }            // upper page RAM 0x4000 - 0x7FFF
-                    if (portIO == 0x7F) { page0 = (~value & 0x02); }           // lower page RAM 0x0000 - 0x3FFF 
+    uint8_t portIO = (uint8_t)(address & 0x00ff);
+    //SGM                
+        if (portIO == 0x50) { SGM_on=1; AY_select_reg(value); return;}           //SGM audio select register
+        if (portIO == 0x51) {AY_set_reg(value); return;}                         //SGM audio set register        
+        if (portIO == 0x53) { SGM_page1 = (value & 0x01); return;}              // upper page RAM 0x4000 - 0x7FFF
+        if (portIO == 0x7F) { SGM_page0 = (~value & 0x02); return; }            // lower page RAM 0x0000 - 0x3FFF 
 
-                    portIO = portIO & 0xE0;
-                    if(portIO == 0xC0) {en_1 = true; }         
-                    if(portIO == 0x80) {en_1 = false;
-                        // start_read_joypad=true;
-                    }
+        portIO = portIO & 0xE0;
+    //select joystick        
+        if(portIO == 0xC0) {en_1 = true; return;}         
+        if(portIO == 0x80) {en_1 = false;return;}
     // pin WR for  pico VDP 9918                     
-                    if(portIO == 0xA0) {gpio_put(VDP_WR,0);}
+        if(portIO == 0xA0) {gpio_put(VDP_WR,0);return;}
     // pin WR for  SN76489                     
-                    if(portIO == 0xE0) {gpio_put(AUD_W,0);}
-
+        if(portIO == 0xE0) {gpio_put(AUD_W,0);return;}
 }
 
 // Z80 read-side address decode: RAM, ROM banks,and BIOS.
 __always_inline static inline uint8_t read_coleco_memory(const uint16_t address) {
-
         switch (address & 0xE000)
     {
         case 0x0000:
-        {
-            return page0 ? SGM_ram[address] : coleco_bios[address];
-        }
-        case 0x2000:
+            {
+                return SGM_page0 ? SGM_ram[address] : coleco_bios[address];
+            }
+        case 0x2000:              
         case 0x4000:
-        {
-            return page1 ? SGM_ram[address] : 0xFF;
-        }
+            {             
+                return SGM_page1 ? SGM_ram[address] : 0xFF;
+            }        
         case 0x6000:
-        {
-            return page1 ? SGM_ram[address] : coleco_ram[address & 0x03FF];
-        }
+            {               
+                return SGM_page1 ? SGM_ram[address] : coleco_ram[address & 0x03FF];
+            }
         case 0x8000:
         case 0xA000:
+            {
+                return coleco_cartrige[lower_bank][address&0x3fff];     // 0x8000-0xBFFF: ROM Cartrige
+            }
         case 0xC000:
         case 0xE000:
-        {
-            // if(address&0xbfe0 == 0xbfe0 ){lower_bank = (uint8_t)address & CNT_BANKS;}     // select lower bank memory 
+            {
             if(lower_bank != 0){
-                if((address&0xffc0) == 0xffc0 ){upper_bank = (uint8_t)address & 0x0007;
-                    reg_2 = upper_bank;
-                    return 0xff;}     // select upper bank memory 
-            }else{
-//-------------------------- CartridgeActivisionCart               
-                // if(address >= 0xFF90 ) {                
-                //     if ((address == 0xFF90) || (address == 0xFFA0) || (address == 0xFFB0)){
-                //        upper_bank = (address >> 4) & 0x0003;
-                //        reg_2 = upper_bank; 
-                //     }                   
-                //     return 0xff;}     // select upper bank memory   
+                if((address&0xffc0 ) == 0xffc0 ){upper_bank = (uint8_t)(address & (bank_qntt-1));} 
+            }else if(address >= 0xFF90 ){
+//-------------------------- CartridgeActivisionCart                      
+                if ((address == 0xFF90) || (address == 0xFFA0) || (address == 0xFFB0)){upper_bank = (uint8_t)(address & (bank_qntt-1));}      
             }
 //-----------------------------
-            // 0x8000-0xFFFF: ROM Cartrige
-            if ((address & 0xC000) == 0x8000) {
-        
-            uint32_t bank_address = (uint32_t)(address&0x3fff)+(uint32_t)((lower_bank)<<14);
-            return coleco_cartrige[bank_address];
-            }
-
-            if ((address & 0xC000) == 0xC000) {
-                uint32_t bank_address = (uint32_t)(address&0x3fff)+(uint32_t)((upper_bank)<<14);                 // upper bank
-                return coleco_cartrige[bank_address];
-            }
+            return coleco_cartrige[upper_bank][address&0x3fff];     // 0xС000-0xFFFF: ROM Cartrige
         }
     // Default open-bus value
     default:
@@ -314,34 +333,27 @@ __always_inline static inline uint8_t write_coleco_memory(const uint16_t address
     {
         case 0x0000:
         {
-            if (page0)
-                SGM_ram[address] = value;
-            break;
+            if (SGM_page0) {SGM_ram[address] = value;}         
         }
-        case 0x2000:
+        break;        
+        case 0x2000:       
         case 0x4000:
         {
-            if (page1)
-                SGM_ram[address] = value;
-            break;
+            if (SGM_page1){ SGM_ram[address] = value;}
         }
+        break;
         case 0x6000:
         {
-            if (page1)
+            if (SGM_page1){         
                 SGM_ram[address] = value;
-            else
-                coleco_ram[address & 0x03FF] = value;
-            break;
+            } else {
+                coleco_ram[address & 0x03FF] = value;         
+                }
         }
-        case 0xE000:{
-                if(address >= 0xFF90 ) {                
-                    if ((address == 0xFF90) || (address == 0xFFA0) || (address == 0xFFB0)){
-                       upper_bank = (address >> 4) & 0x0003;
-                       reg_2 = upper_bank; 
-                    }
-                }            
-        }
-        // case 0x8000:
+        break;
+        case 0x8000:
+        case 0xC000:
+        case 0xE000:
         break;
     }
 }
@@ -353,9 +365,9 @@ void __time_critical_func(Z80_loop)() {
         //------------memory ok-----------------
 
         while(!(gpio_get_all64() & MREQ_MASK)) {                                    // memory read write
-                uint16_t address = (uint16_t)((gpio_get_all()) & 0x0000ffff);  
+                uint16_t address = (uint16_t)((gpio_get_all()) & ADDR_MASK);  
                 while(!(gpio_get_all() & READ_MASK)) {                                  //  read from         
-                    const uint32_t data = read_coleco_memory(address) << 16;
+                    const uint32_t data = (read_coleco_memory(address) << 16);
                     gpio_put_masked(DATA_MASK,data);
                     gpio_set_dir_out_masked(DATA_MASK);
                 }
@@ -371,37 +383,29 @@ void __time_critical_func(Z80_loop)() {
     
     // io port
         while(!(gpio_get_all64() & IORQ_MASK)) {
-            uint16_t address = (gpio_get_all()) ;              // mask io port address
-            uint8_t portIO = (uint8_t)(0x00FF & address);
+            uint16_t address = (uint16_t)((gpio_get_all()) & ADDR_MASK);              // mask io port address
+            uint8_t portIO = (uint8_t)(0x00E0 & address);
 
     // read from IO             
-            while(!(gpio_get_all() & READ_MASK)) {                              // read from IO
-
-                    if((portIO & 0xE2) == 0xE0) {                              // first joypad == 0xE0/ second == 0xE2
-                        uint8_t temp;
-                        if(en_1){temp = data_joysticks[0];}else{temp = data_joysticks[1];}  
-                        const uint32_t data = ((uint32_t)temp) << 16 ; 
+            while(!(gpio_get_all() & READ_MASK)) {                              // read from IO  
+                const uint32_t data = ((uint32_t)read_coleco_io(address)) << 16 ;
+                if (portIO == 0xA0){                    // bus for vdp or io
+                        gpio_put(VDP_RD,0);
+                    }else{
                         gpio_put_masked(DATA_MASK,data);           
-                        gpio_set_dir_out_masked(DATA_MASK);
-                        } 
-                    if((portIO & 0xE2) == 0xE2) {                              // first joypad == 0xE0/ second == 0xE2
-                        uint8_t temp;
-                        if(en_1){temp = data_joysticks[2];}else{temp = data_joysticks[3];}                         
-                        const uint32_t data = ((uint32_t)temp) << 16 ;
-                        gpio_put_masked(DATA_MASK,data);           
-                        gpio_set_dir_out_masked(DATA_MASK);
-                        }
-    // pin RD for  pico VDP 9918                                                  
-                    if((portIO & 0xE0) == 0xA0) {gpio_put(VDP_RD,0);}                                                 
+                        gpio_set_dir_out_masked(DATA_MASK);                        
+                    }
             }
     // write to IO        
             while(!(gpio_get_all64() & WRITE_MASK)) {                              // write to IO
-
-                uint8_t datawritetoio = (uint8_t)((gpio_get_all() >> 16)&0x000000ff);
+                if (portIO == 0xA0){
+                    gpio_put(VDP_WR,0);
+                }else{
+                uint8_t datawritetoio = (uint8_t)((gpio_get_all() >> 16 )&0x000000ff);
                 write_coleco_io(address,datawritetoio);
                 }
             gpio_set_dir_in_masked(DATA_MASK);
-
+            }
         }
         gpio_put(VDP_WR,1);
         gpio_put(VDP_RD,1);
@@ -409,29 +413,52 @@ void __time_critical_func(Z80_loop)() {
     }
 }
 
-uint8_t checkROM(size_t application_len ){
+uint8_t checkROM( size_t  application_len ){
         uint32_t headerROM = 0;
-        uint32_t offsetROM = 0;
         uint8_t start_bank = 0;
-        uint16_t lenght_rom = (uint16_t)application_len; 
+        uint32_t lenght_rom = (uint32_t)application_len; 
         bool ROMisOK;
 
         uint8_t bank_qntt = lenght_rom / 0x4000 ;     
-        headerROM = coleco_cartrige[offsetROM + 1] | (coleco_cartrige[offsetROM + 0] << 8);
+        headerROM = coleco_cartrige[0][0] | (coleco_cartrige[0][1] << 8);
         ROMisOK = (headerROM == 0xAA55) || (headerROM == 0x55AA);
+        printf("Lenght ROM = %05x   Header bank 0 = %04x\n",application_len, headerROM);
 
-        if(ROMisOK){start_bank = 0;  return start_bank; }
-        else if(lenght_rom > 0x8000){
-
-                offsetROM = lenght_rom - 0x4000;
-           
-                headerROM = coleco_cartrige[offsetROM + 1] | (coleco_cartrige[offsetROM + 0] << 8);
-                ROMisOK = (headerROM == 0xAA55) || (headerROM == 0x55AA);
-
-                if(ROMisOK){start_bank = bank_qntt - 1;return start_bank; }
+        if(ROMisOK){ start_bank = 0;  return start_bank;
+         }else{
+            headerROM = coleco_cartrige[bank_qntt-1][1] | (coleco_cartrige[bank_qntt-1][0] << 8);
+            ROMisOK = (headerROM == 0xAA55) || (headerROM == 0x55AA);
+            if(ROMisOK){start_bank = bank_qntt - 1;return start_bank; }
         }
+        printf("ROM failure \n");
+        return 0x00;
+}
 
-    }
+// void load_cartridge(uint8_t* rom_data, size_t total_size) {
+
+//     const size_t BANK_SIZE = 0x4000; // 16 КБ
+//     bank_qntt = total_size / BANK_SIZE ;
+//     size_t remainder = total_size - (size_t)(bank_qntt * BANK_SIZE);
+//     if(total_size <= 0x20000){
+//         for (size_t i = 0; i < bank_qntt; i ++) { memcpy(coleco_cartrige[i],rom_data + (i*BANK_SIZE),BANK_SIZE);}
+
+//         if(remainder != 0) {memcpy(coleco_cartrige[bank_qntt],rom_data + (bank_qntt*BANK_SIZE),remainder);}
+
+//         lower_bank = checkROM(total_size);
+//         if(lower_bank == 0){upper_bank = 1;} else { upper_bank = 0;}
+
+//     }else{printf("ROM too big for... 128 kB \n");}
+// }
+
+
+// Обработчик прерывания таймера для SGM  PSG AY-8910
+
+bool SGM_PSG_callback(struct repeating_timer *t) {      
+        if(SGM_on){
+            sample_to_send = (get_AY_Out(1)<<3)+0x10;
+        }       
+    return true; // Продолжаем повторение
+}
 
 // Обработчик таймера 8ms
 bool my_timer_callback(struct repeating_timer *t) {
@@ -454,19 +481,7 @@ int main() {
 
     stdio_init_all();
 
-    
-	struct repeating_timer timer_8ms;
-    
-    // Запускаем таймер: интервал 8 мс, немедленный старт
-    if (!add_repeating_timer_ms(-8, my_timer_callback, NULL, &timer_8ms)) {
-        printf("Failed to start timer\n");
-        return -1;
-    }
-
-    // clock for CPU
- 
-
-    // Initialize pins
+        // Initialize pins
     gpio_init_mask(ADDR_MASK | DATA_MASK);
     gpio_set_dir_in_masked(ADDR_MASK | DATA_MASK);
     Z80_pin_setup();
@@ -475,100 +490,131 @@ int main() {
 
     VDP_INT_init();
 
-// sleep_ms(5000);    
+// sleep_ms(3000);
 
-FATFS fs;
-FIL file_sd;
-UINT br;
-FRESULT res;
+        struct repeating_timer timer_8ms;           // timer for input
+        struct repeating_timer timerAY;             // timer for SGM PSG AY8910
+        
+        // Период в микросекундах: 1 000 000 / 58 000 ≈ 17,24 мкс
+        int64_t period_us = 1000000LL / 110000;
+        // Запускаем таймер с заданным периодом
+        if (!add_repeating_timer_us(-period_us, SGM_PSG_callback, NULL, &timerAY)) {
+            printf("Failed to start timer\n");
+            return -1;
+        }
+    
+        // Запускаем таймер: интервал 8 мс, немедленный старт
+        if (!add_repeating_timer_ms(-8, my_timer_callback, NULL, &timer_8ms)) {
+            printf("Failed to start timer\n");
+            return -1;
+        }
+//---------------
+    const uint PWM_PIN = SGM_PSG;
+    const float SYS_CLK = 315000000.0f;
+    // const float PWM_FREQ = 44100.0f;
+    const float PWM_FREQ = 88200.0f;
+    // const uint SAMPLE_FREQ = 33000;
 
-// 1. Монтируем SD
-if (FR_OK != f_mount(&fs, "", 1)) {
-    printf("SD Card not mounted!\n");
-    while (1) {}  // вешаем плату, чтобы видеть ошибку
-}
+    // 1. Настройка PWM (44 кГц)
+    gpio_set_function(PWM_PIN, GPIO_FUNC_PWM);
+    uint slice = pwm_gpio_to_slice_num(PWM_PIN);
+    uint chan = pwm_gpio_to_channel(PWM_PIN);
+    uint32_t top = (uint32_t)(SYS_CLK / PWM_FREQ) - 1;
+    pwm_set_wrap(slice, top);
+    pwm_set_enabled(slice, true);
 
-// ---------------------------------------------------------
-// Загрузка BIOS (всегда фиксированный размер для Coleco)
-// ---------------------------------------------------------
-const size_t bios_size = 0x2000;  // 8 КБ — стандартный размер BIOS ColecoVision
-res = f_open(&file_sd, "/COL/BIOS/main.rom", FA_READ);
-if (res != FR_OK) {
-    printf("Cannot open BIOS file!\n");
-    while (1) {}
-}
-res = f_read(&file_sd, coleco_bios, bios_size, &br);
-f_close(&file_sd);
+    // Адрес регистра для записи уровня ШИМ (CC - Compare Counter)
+    volatile void* pwm_cc_reg = (void*)&pwm_hw->slice[slice].cc;
 
-if (res != FR_OK || br != bios_size) {
-    printf("BIOS read error or size mismatch: expected %lu, got %lu\n",
-           (unsigned long)bios_size, (unsigned long)br);
-    while (1) {}
-}
-printf("BIOS loaded: %lu bytes\n", (unsigned long)br);
+    // 2. Настройка DMA
+    int dma_chan = dma_claim_unused_channel(true);
+    dma_channel_config c = dma_channel_get_default_config(dma_chan);
+    
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_16); // 16 бит
+    channel_config_set_read_increment(&c, false);          // Читаем из одного места
+    channel_config_set_write_increment(&c, false);         // Пишем в один регистр
+    
+    // Синхронизация по таймеру (DREQ_TIMER0)
+    int timer_dreq = dma_get_timer_dreq(0); 
+    channel_config_set_dreq(&c, timer_dreq);
 
-// ---------------------------------------------------------
-// Загрузка ROM картриджа (универсально до 128 КБ)
-// ---------------------------------------------------------
-const char *rom_path = "/COL/CART/game.rom";  // путь к файлу
-size_t max_rom_size = 131072;                // 128 КБ = 128 * 1024
+    // Настраиваем таймер на 33 кГц (315МГц / 10000 = 31.5кГц)
+    // Либо используем встроенный механизм dma_timer:
+    dma_timer_set_fraction(0, 1, 10000); // Настройка делителя таймера 0
 
-// Сначала узнаём реальный размер файла на SD
-FILINFO fno;
-res = f_stat(rom_path, &fno);
-if (res != FR_OK) {
-    printf("ROM file not found: %s\n", rom_path);
-    // continue;
-}
+    dma_channel_configure(
+        dma_chan,
+        &c,
+        pwm_cc_reg,        // Куда (PWM CC register)
+        &sample_to_send,   // Откуда (Ваша переменная)
+        0xFFFFFFFF,        // Сколько раз (бесконечно в режиме зацикливания)
+        true               // Старт
+    );
+    
+    FATFS fs;
+    FIL file_sd;
+    UINT br;
+    FRESULT res;      
+ 
+        // Mount SD card filesystem
+    if (FR_OK != f_mount(&fs, "", 1)) {
+        // while (!stdio_usb_connected()) { tight_loop_contents(); }
+        printf("SD Card not inserted or SD Card error!");
+    }
+    
+        // Load BIOS
+    res = f_open(&file_sd, "/COL/BIOS/main.rom", FA_READ);
+    if (res != FR_OK) {
+        printf("Cannot open BIOS!\n");
+    }
 
-size_t file_size = fno.fsize;
-if (file_size == 0 || file_size > max_rom_size) {
-    printf("Invalid ROM size: %lu bytes (max %lu)\n",
-           (unsigned long)file_size, (unsigned long)max_rom_size);
-    // continue;   
-}
+    res = f_read(&file_sd, coleco_bios, 0x2000, &br);
+    f_close(&file_sd);
 
-// Открываем и читаем ровно file_size байт
-res = f_open(&file_sd, rom_path, FA_READ);
-if (res != FR_OK) {
-    printf("Cannot open ROM file!\n");
-    // continue;
-}
-res = f_read(&file_sd, coleco_cartrige, file_size, &br);
-f_close(&file_sd);
+    if (res != FR_OK || br == 0) {
+        printf("BIOS read error!\n");
+        // reset_usb_boot(0, 0);
+    }
+    printf("BIOS loaded: %u bytes\n", br);
 
-if (res != FR_OK || br != file_size) {
-    printf("ROM read error: expected %lu, got %lu\n",
-           (unsigned long)file_size, (unsigned long)br);
-    // continue;
-}
-printf("ROM loaded: %lu bytes from %s\n", (unsigned long)file_size, rom_path);
+    // Load program
 
-// Теперь можно вызывать твой checkROM с реальным размером файла
-lower_bank = checkROM(file_size);
-if (lower_bank == 0) {
-    upper_bank = 1;
-} else {
-    upper_bank = 0;
-}
+    res = f_open(&file_sd, "/COL/CART/game.rom", FA_READ);
+    if (res != FR_OK) {
+        printf("Cannot open cartridge!\n");
+        // return;
+    }
 
+    size_t cart_size = 0;
+    for (int i = 0; i < 8; i++) {
+        res = f_read(&file_sd, coleco_cartrige[i], 0x4000, &br);
+        if (res != FR_OK || br == 0) break;
+        cart_size += br;
+        if (br < 0x4000) break;  // файл кончился
+    }
+    f_close(&file_sd);
 
-// START
+    printf("Cartridge loaded: %u bytes, %u pages\n",cart_size, (cart_size + 0x3FFF) / 0x4000); 
 
-printf("Start");
+    bank_qntt = (cart_size + 0x3FFF) / 0x4000;
+
+    lower_bank = checkROM(cart_size);
+    if(lower_bank == 0){upper_bank = 1;} else { upper_bank = 0;}
+    // load_cartridge(thexder_rom,sizeof(thexder_rom));
+
+    AY_reset();                 //reset SGM audio
 
     multicore_launch_core1(Z80_loop);
 
-    busy_wait_ms(250);
+    busy_wait_ms(500);
         
     gpio_put(RESET_PIN,1);    
 
-
 encoder1 = 0x4f;
 
+//--------------------------------------
     while (true) {
     //decode joypad buttons
-
         if(start_read_joypad){
             // resieveI2C();
             uint16_t data_joy = read_joystick_data();
@@ -618,7 +664,12 @@ encoder1 = 0x4f;
 
         data_joysticks[0] |= encoder1 & 0xB0;
 
-        // sendI2C(~encoder_counter,data_joysticks[0]);
-  
+
+if(start_reg){     
+printf("Lower bank = %02x   Upper bank = %02x \n", lower_bank, upper_bank);
+start_reg = 0;}
+
+//---------------------------------  
     }//while
+
 }//main
